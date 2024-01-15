@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from urllib.parse import urlparse
 
 import aiohttp
@@ -43,8 +44,8 @@ async def scrape(domain: str, page_id: str) -> dict[str, str]:
                 return {
                     "error": f'Could not connect to Notion, status: {response.status}, reason: {response.reason}',
                 }
-    except Exception:
-        return {"error": f'Could not connect to Notion to parse tasks with id: {page_id}!'}
+    except Exception as e:
+        return {"error": f'Could not connect to Notion to parse tasks with id: {page_id}! Error: {str(e)}'}
 
 
 def extract_domain_and_page_id_from_url(url: str) -> dict[str, str]:
@@ -69,13 +70,14 @@ def extract_domain_and_page_id_from_url(url: str) -> dict[str, str]:
         else:
             page_id = path_parts[2][-32:]
 
-        if len(page_id) != 32:
+        pattern = r'^[a-zA-Z0-9]{32}$'
+        if not re.match(pattern, page_id):
             return {'message': f'Could not extract page_id from url: {url}, page_id length is not 32 symbols'}
 
         page_id = page_id[:8] + '-' + page_id[8:12] + '-' + page_id[12:16] + '-' + page_id[16:20] + '-' + page_id[20:]
         return {'domain': domain, 'page_id': page_id}
-    except Exception:
-        return {'message': f'Could not extract domain and page_id from url: {url}'}
+    except Exception as e:
+        return {'message': f'Could not extract domain and page_id from url: {url}. Error: {str(e)}'}
 
 
 async def parse_exercises(data: dict) -> list[str]:
@@ -103,20 +105,17 @@ async def parse_exercises(data: dict) -> list[str]:
     all_tasks = []
     task = []
     for block in filtered_data:
-        if 'header' in block.type_:
-            task.append(
-                '<h3>' + block.properties['title'][0][0] + '</h3>',
-            )
-        elif 'code' in block.type_:
-            task.append(
-                '<pre class="ql-syntax">' + block.properties['title'][0][0] + '</pre>',
-            )
+        title = block.properties.get('title')
+        if title and 'header' in block.type_:
+            task.append('<h3>' + title[0][0] + '</h3>')
+        elif title and 'code' in block.type_:
+            task.append('<pre class="ql-syntax">' + title[0][0] + '</pre>')
         elif block.type_ == 'divider':
             all_tasks.append(''.join(task))
             task = []
-        else:
+        elif title:
             text = []
-            for i in block.properties['title']:
+            for i in title:
                 if isinstance(i, str):
                     text.append(i)
                 else:
@@ -138,22 +137,27 @@ async def get_exercises_from_notion(link: str) -> list[str] | dict[str, str]:
         A list of exercise strings if successful, or a dictionary with an error message if unsuccessful.
     """
     extracted_data = extract_domain_and_page_id_from_url(link)
+
+    if 'message' in extracted_data:
+        return extracted_data
+
     domain = extracted_data.get('domain')
     page_id = extracted_data.get('page_id')
 
-    if domain and page_id:
-        data: dict = await scrape(domain, page_id)
-        if data.get('error'):
-            return {'message': data.get('error')}
+    data: dict = await scrape(domain, page_id)
+    if error := data.get('error'):
+        return {'message': error}
+    try:
         records = data.get('recordMap')
         return await parse_exercises(records)
-    return {'message': f'Could not extract domain and page_id from url: {link}'}
+    except Exception as e:
+        return {'message': f'Could not parse exercises from Notion: {link}. Error: {str(e)}'}
 
 
 if __name__ == '__main__':
     # Example for getting exercises from a Notion page
-    url = 'https://it-cat.notion.site/0d91ec8678c64230b81f512855125d52'
-    notion_data = asyncio.run(get_exercises_from_notion(url))
+    URL = 'https://it-cat.notion.site/0d91ec8678c64230b81f512855125d52?pvs=4'
+    notion_data = asyncio.run(get_exercises_from_notion(URL))
 
     if 'message' not in notion_data:
         [
